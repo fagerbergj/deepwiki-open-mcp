@@ -1,7 +1,7 @@
 // Command deepwiki-open-mcp is a thin MCP server exposing a self-hosted
-// deepwiki-open instance through the same three tools as Devin's DeepWiki
-// MCP server (mcp.deepwiki.com), so any client configured for Devin's server
-// works against this one by swapping the URL.
+// deepwiki-open instance through Devin's three DeepWiki MCP tools
+// (mcp.deepwiki.com) plus a fourth, list_wikis, so any client configured for
+// Devin's server works against this one by swapping the URL.
 package main
 
 import (

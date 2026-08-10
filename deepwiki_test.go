@@ -100,11 +100,16 @@ func TestFetchWikiCache_HTTPError(t *testing.T) {
 
 func TestAskQuestion(t *testing.T) {
 	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/api/chat/stream" {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/wiki_cache":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(sampleWikiCache))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/chat/stream":
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("The vetting judge uses a threshold of 0.7."))
+		default:
 			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("The vetting judge uses a threshold of 0.7."))
 	})
 
 	got, err := client.askQuestion(context.Background(), "fagerbergj/quack", "What threshold does the vetting judge use?")
@@ -113,6 +118,45 @@ func TestAskQuestion(t *testing.T) {
 	}
 	if want := "0.7"; !strings.Contains(got, want) {
 		t.Errorf("askQuestion() = %q, missing %q", got, want)
+	}
+}
+
+func TestAskQuestion_NotIndexed(t *testing.T) {
+	calls := 0
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/chat/stream" {
+			calls++
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("null"))
+	})
+
+	_, err := client.askQuestion(context.Background(), "fagerbergj/nope", "What is this?")
+	if !errors.Is(err, ErrNotIndexed) {
+		t.Fatalf("askQuestion() error = %v, want ErrNotIndexed", err)
+	}
+	if calls != 0 {
+		t.Errorf("chat/stream calls = %d, want 0 - an unindexed repo must never reach chat/stream", calls)
+	}
+}
+
+func TestReadWikiList(t *testing.T) {
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/wiki/projects" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"owner":"fagerbergj","repo":"quack","repo_type":"github","language":"en"},{"owner":"google","repo":"adk-go","repo_type":"github","language":"en"}]`))
+	})
+
+	got, err := client.readWikiList(context.Background())
+	if err != nil {
+		t.Fatalf("readWikiList() error = %v", err)
+	}
+	for _, want := range []string{"fagerbergj/quack", "google/adk-go"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("readWikiList() = %q, missing %q", got, want)
+		}
 	}
 }
 

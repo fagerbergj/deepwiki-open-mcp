@@ -1,5 +1,5 @@
 // Package main's deepwiki.go talks to a self-hosted deepwiki-open instance
-// and shapes its responses into the three DeepWiki MCP tool results.
+// and shapes its responses into the four DeepWiki MCP tool results.
 package main
 
 import (
@@ -155,9 +155,61 @@ func (c *deepwikiClient) readWikiContents(ctx context.Context, repoName string) 
 	return b.String(), nil
 }
 
+// wikiProject is one entry in deepwiki-open's /api/wiki/projects listing.
+type wikiProject struct {
+	Owner    string `json:"owner"`
+	Repo     string `json:"repo"`
+	RepoType string `json:"repo_type"`
+	Language string `json:"language"`
+}
+
+// readWikiList renders every repo indexed on this deepwiki-open instance as
+// an "owner/repo" line.
+func (c *deepwikiClient) readWikiList(ctx context.Context) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/wiki/projects", nil)
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("deepwiki-open request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("reading deepwiki-open response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("deepwiki-open returned HTTP %d: %s", resp.StatusCode, string(body))
+	}
+
+	var projects []wikiProject
+	if err := json.Unmarshal(body, &projects); err != nil {
+		return "", fmt.Errorf("decoding deepwiki-open wiki/projects response: %w", err)
+	}
+	if len(projects) == 0 {
+		return "No repositories are indexed on this deepwiki-open instance.\n", nil
+	}
+
+	var b strings.Builder
+	for _, p := range projects {
+		fmt.Fprintf(&b, "%s/%s\n", p.Owner, p.Repo)
+	}
+	return b.String(), nil
+}
+
 // askQuestion posts to deepwiki-open's chat/stream endpoint and returns the
 // full plain-text response body (it streams chunked text, not SSE frames).
+// It checks wiki_cache first: chat/stream will clone-and-index an unknown
+// repo on demand, which is exactly what callers must never trigger from a
+// typo'd repoName.
 func (c *deepwikiClient) askQuestion(ctx context.Context, repoName, question string) (string, error) {
+	if _, err := c.fetchWikiCache(ctx, repoName); err != nil {
+		return "", err
+	}
+
 	owner, repo, err := splitRepoName(repoName)
 	if err != nil {
 		return "", err

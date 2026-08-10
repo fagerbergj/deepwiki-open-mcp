@@ -1,6 +1,19 @@
 # deepwiki-open-mcp
 
-A thin MCP server that wraps a self-hosted [deepwiki-open](https://github.com/AsyncFuncAI/deepwiki-open) instance and exposes the same three tools as Devin's closed-source [DeepWiki MCP server](https://mcp.deepwiki.com/mcp): `read_wiki_structure`, `read_wiki_contents`, and `ask_question`, with matching names, descriptions, and input schemas. Any MCP client already configured for Devin's server works against this one by swapping the URL — answers just come from your own deepwiki-open instance instead.
+A thin MCP server that wraps a self-hosted [deepwiki-open](https://github.com/AsyncFuncAI/deepwiki-open) instance and exposes the same three tools as Devin's closed-source [DeepWiki MCP server](https://mcp.deepwiki.com/mcp) — `read_wiki_structure`, `read_wiki_contents`, and `ask_question` — with matching names, descriptions, and input schemas, plus a fourth tool, `list_wikis`. Any MCP client already configured for Devin's server works against this one by swapping the URL — answers just come from your own deepwiki-open instance instead.
+
+## Tools
+
+| Tool | Description |
+|---|---|
+| `read_wiki_structure` | List documentation topics for a GitHub repository. |
+| `read_wiki_contents` | View documentation about a GitHub repository. |
+| `ask_question` | Ask any question about a GitHub repository and get an AI-powered, context-grounded response. |
+| `list_wikis` | List the repositories indexed on this deepwiki-open instance. |
+
+`list_wikis` is a deliberate deviation from Devin's three-tool contract: Devin's index effectively covers all of GitHub, so a client never needs to browse it, but a self-hosted deepwiki-open instance only knows a small curated set of repos — discoverability matters here in a way it doesn't for Devin's server.
+
+An unindexed `repoName` never triggers deepwiki-open's on-demand clone-and-index (which can run for hours and hit a bare instance with a bare-clone auth failure). Every tool checks the wiki cache first and, if the repo isn't indexed, returns plain-text guidance pointing at `list_wikis` — matching Devin's own ergonomics for an unknown repo, so a model reads the message and self-corrects instead of retrying blind against a protocol error.
 
 ## Environment variables
 

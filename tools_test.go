@@ -5,14 +5,28 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// fakeDeepwikiOpen stubs the two deepwiki-open endpoints the tools call.
-func fakeDeepwikiOpen(t *testing.T, indexed bool) *httptest.Server {
+const sampleWikiProjects = `[
+  {"owner": "fagerbergj", "repo": "quack", "repo_type": "github", "language": "en"},
+  {"owner": "google", "repo": "adk-go", "repo_type": "github", "language": "en"}
+]`
+
+// fakeDeepwikiOpen stubs the deepwiki-open endpoints the tools call. It
+// counts /api/chat/stream hits so tests can assert the not-indexed guard
+// never let a request reach it.
+type fakeDeepwikiOpen struct {
+	*httptest.Server
+	chatStreamCalls int32
+}
+
+func newFakeDeepwikiOpen(t *testing.T, indexed bool) *fakeDeepwikiOpen {
 	t.Helper()
+	f := &fakeDeepwikiOpen{}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/wiki_cache", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -23,11 +37,16 @@ func fakeDeepwikiOpen(t *testing.T, indexed bool) *httptest.Server {
 		_, _ = w.Write([]byte(sampleWikiCache))
 	})
 	mux.HandleFunc("/api/chat/stream", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&f.chatStreamCalls, 1)
 		_, _ = w.Write([]byte("The vetting judge uses a threshold of 0.7."))
 	})
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-	return srv
+	mux.HandleFunc("/api/wiki/projects", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(sampleWikiProjects))
+	})
+	f.Server = httptest.NewServer(mux)
+	t.Cleanup(f.Server.Close)
+	return f
 }
 
 // connectClient wires the real /mcp HTTP handler behind an httptest.Server
@@ -60,7 +79,7 @@ func textOf(res *mcp.CallToolResult) string {
 }
 
 func TestTools_ListedWithDevinNames(t *testing.T) {
-	deepwiki := fakeDeepwikiOpen(t, true)
+	deepwiki := newFakeDeepwikiOpen(t, true)
 	cs := connectClient(t, deepwiki.URL)
 
 	res, err := cs.ListTools(context.Background(), nil)
@@ -71,7 +90,7 @@ func TestTools_ListedWithDevinNames(t *testing.T) {
 	for _, tool := range res.Tools {
 		got[tool.Name] = true
 	}
-	for _, want := range []string{"read_wiki_structure", "read_wiki_contents", "ask_question"} {
+	for _, want := range []string{"read_wiki_structure", "read_wiki_contents", "ask_question", "list_wikis"} {
 		if !got[want] {
 			t.Errorf("tools/list missing %q; got %v", want, got)
 		}
@@ -79,7 +98,7 @@ func TestTools_ListedWithDevinNames(t *testing.T) {
 }
 
 func TestReadWikiStructureTool_HappyPath(t *testing.T) {
-	deepwiki := fakeDeepwikiOpen(t, true)
+	deepwiki := newFakeDeepwikiOpen(t, true)
 	cs := connectClient(t, deepwiki.URL)
 
 	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
@@ -98,7 +117,7 @@ func TestReadWikiStructureTool_HappyPath(t *testing.T) {
 }
 
 func TestReadWikiContentsTool_HappyPath(t *testing.T) {
-	deepwiki := fakeDeepwikiOpen(t, true)
+	deepwiki := newFakeDeepwikiOpen(t, true)
 	cs := connectClient(t, deepwiki.URL)
 
 	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
@@ -117,7 +136,7 @@ func TestReadWikiContentsTool_HappyPath(t *testing.T) {
 }
 
 func TestAskQuestionTool_HappyPath(t *testing.T) {
-	deepwiki := fakeDeepwikiOpen(t, true)
+	deepwiki := newFakeDeepwikiOpen(t, true)
 	cs := connectClient(t, deepwiki.URL)
 
 	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
@@ -136,7 +155,7 @@ func TestAskQuestionTool_HappyPath(t *testing.T) {
 }
 
 func TestReadWikiStructureTool_NotIndexed(t *testing.T) {
-	deepwiki := fakeDeepwikiOpen(t, false)
+	deepwiki := newFakeDeepwikiOpen(t, false)
 	cs := connectClient(t, deepwiki.URL)
 
 	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
@@ -146,11 +165,56 @@ func TestReadWikiStructureTool_NotIndexed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CallTool: %v", err)
 	}
-	if !res.IsError {
-		t.Fatal("IsError = false, want true for an unindexed repo")
+	// Matches Devin's own ergonomics: guidance text, not a protocol error.
+	if res.IsError {
+		t.Fatalf("IsError = true, want false for an unindexed repo; content = %v", textOf(res))
 	}
-	if got := textOf(res); !strings.Contains(got, "not indexed") {
-		t.Errorf("content = %q, want it to explain the repo is not indexed", got)
+	if got := textOf(res); !strings.Contains(got, "not indexed") || !strings.Contains(got, "list_wikis") {
+		t.Errorf("content = %q, want it to explain the repo is not indexed and point at list_wikis", got)
+	}
+}
+
+func TestAskQuestionTool_NotIndexed(t *testing.T) {
+	deepwiki := newFakeDeepwikiOpen(t, false)
+	cs := connectClient(t, deepwiki.URL)
+
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "ask_question",
+		Arguments: map[string]any{"repoName": "google/adk", "question": "What does this do?"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("IsError = true, want false for an unindexed repo; content = %v", textOf(res))
+	}
+	if got := textOf(res); !strings.Contains(got, "not indexed") || !strings.Contains(got, "list_wikis") {
+		t.Errorf("content = %q, want it to explain the repo is not indexed and point at list_wikis", got)
+	}
+	if calls := atomic.LoadInt32(&deepwiki.chatStreamCalls); calls != 0 {
+		t.Errorf("chat/stream calls = %d, want 0 - an unindexed repo must never reach chat/stream", calls)
+	}
+}
+
+func TestListWikisTool_HappyPath(t *testing.T) {
+	deepwiki := newFakeDeepwikiOpen(t, true)
+	cs := connectClient(t, deepwiki.URL)
+
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "list_wikis",
+		Arguments: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("IsError = true, content = %v", textOf(res))
+	}
+	got := textOf(res)
+	for _, want := range []string{"fagerbergj/quack", "google/adk-go"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("content = %q, missing %q", got, want)
+		}
 	}
 }
 
